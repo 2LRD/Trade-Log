@@ -1,0 +1,42 @@
+# ── Personal data — NEVER commit ──────────────────────────────────────────────
+tradelog.db
+tradelog.db-shm
+tradelog.db-wal
+backup-*.db
+backups/
+attachments/
+plan_attachments/
+imports/
+
+# ── Build / packaging output ──────────────────────────────────────────────────
+dist/
+build/
+*.spec
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editor / tools ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.claude/
+
+# ── Secrets / local config ────────────────────────────────────────────────────
+.env
+.env.local
+.streamlit/secrets.toml
