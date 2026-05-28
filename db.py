@@ -184,6 +184,8 @@ MIGRATIONS = [
     # trailing stop
     ("trades", "trail_type",               "TEXT DEFAULT 'fixed'"),
     ("trades", "trail_amount",             "REAL"),
+    # non-US exchange code (e.g. IBIS, LSE, TSX) — drives yfinance suffix for price lookups
+    ("trades", "exchange",                 "TEXT DEFAULT ''"),
 ]
 
 INDEXES = [

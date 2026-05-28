@@ -591,6 +591,7 @@ def parse_flex_trades(root_or_xml) -> list[dict]:
                 "date":            _yyyymmdd_to_iso(node.get("tradeDate", "")),
                 "datetime":        node.get("dateTime", ""),
                 "ticker":          node.get("underlyingSymbol", "") or node.get("symbol", ""),
+                "exchange":        node.get("listingExchange", "") or node.get("exchange", "") or "",
                 "instrument_type": _instrument_type,
                 "side":            "long" if (node.get("buySell", "") == "BUY") else "short",
                 "quantity":        abs(qty),
@@ -675,6 +676,7 @@ def parse_flex_trades(root_or_xml) -> list[dict]:
                 trades.append({
                     "entry_date":      None,
                     "ticker":          close_fills[0]["ticker"],
+                    "exchange":        close_fills[0]["exchange"],
                     "quantity":        _co_qty,
                     "entry_price":     None,
                     "exit_date":       _to_date(close_fills[-1]["date"]),
@@ -730,6 +732,7 @@ def parse_flex_trades(root_or_xml) -> list[dict]:
         trades.append({
             "entry_date":      _to_date(entry_date),
             "ticker":          first_fill["ticker"],
+            "exchange":        first_fill["exchange"],
             "quantity":        total_open_qty,
             "entry_price":     round(avg_open_price, 6),
             "exit_date":       _to_date(exit_date),
