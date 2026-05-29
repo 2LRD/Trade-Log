@@ -812,14 +812,24 @@ def _to_date(v):
 
 def parse_ib_executions_to_trades(executions: list[dict]) -> list[dict]:
     """
-    Match BOT/SLD pairs from IB executions into open/close trade records.
-    Groups by ticker + expiration + strike + option_type.
+    Aggregate IB execution fills into one trade record per instrument leg.
+
+    Groups fills by instrument identity (ticker + expiration + strike + option_type),
+    then aggregates all BOT fills into a single long entry and all unmatched SLD fills
+    into a single short entry.  This correctly handles partial fills — three 1-contract
+    fills of the same leg produce one 3-contract trade record rather than three separate
+    records.
+
+    For options, IB assigns the same permId to every fill that belongs to the same
+    spread/combo order.  That permId is stored in the leg_group field by get_executions()
+    and is reused here so spread legs end up in the same leg_group automatically.
+
     Returns list of dicts compatible with add_trade() kwargs.
     """
     from collections import defaultdict
     import uuid as _uuid
 
-    # Group by instrument identity
+    # ── Group fills by instrument identity ────────────────────────────────────
     buckets: dict[str, list[dict]] = defaultdict(list)
     for ex in sorted(executions, key=lambda x: x["time"]):
         key = "_".join([
@@ -830,74 +840,78 @@ def parse_ib_executions_to_trades(executions: list[dict]) -> list[dict]:
         ])
         buckets[key].append(ex)
 
+    def _wagg(fs: list[dict]) -> tuple[float, float]:
+        """Return (total_qty, weighted_avg_price) for a list of fills."""
+        qty   = sum(f["quantity"] for f in fs)
+        price = sum(f["quantity"] * f["price"] for f in fs) / qty if qty else 0.0
+        return qty, round(price, 6)
+
     trades: list[dict] = []
     for key, fills in buckets.items():
-        open_fills: list[dict]  = []
-        close_fills: list[dict] = []
-        for f in fills:
-            if f["side"] == "long":
-                open_fills.append(f)
-            else:
-                close_fills.append(f)
+        bot_fills = [f for f in fills if f["side"] == "long"]   # BOT
+        sld_fills = [f for f in fills if f["side"] == "short"]  # SLD
 
-        # Pair opens (BOT) with closes (SLD used as exit for a long)
-        used_closes: set[int] = set()
-        for i, op in enumerate(open_fills):
-            matched_close: dict | None = None
-            for j, cl in enumerate(close_fills):
-                if j not in used_closes and cl["date"] >= op["date"] and abs(cl["quantity"] - op["quantity"]) < 0.001:
-                    matched_close = cl
-                    used_closes.add(j)
-                    break
-            leg_group = str(op.get("leg_group") or _uuid.uuid4())
-            trade = {
-                "entry_date":      _to_date(op["date"]),
-                "ticker":          op["ticker"],
-                "quantity":        op["quantity"],
-                "entry_price":     op["price"],
-                "exit_date":       _to_date(matched_close["date"])  if matched_close else None,
-                "exit_price":      matched_close["price"] if matched_close else None,
-                "notes":           f"Imported from IB (execId: {op.get('exec_id', '')})",
-                "stop_enabled":    False,
-                "opening_stop":    None,
-                "tag_ids":         [],
-                "current_stop":    None,
-                "instrument_type": op["instrument_type"],
-                "expiration":      op.get("expiration"),
-                "strike":          op.get("strike"),
-                "option_type":     op.get("option_type"),
-                "multiplier":      op.get("multiplier", 1.0),
-                "leg_group":       leg_group,
-                "leg_label":       f"Leg {i + 1}",
-                "side":            op["side"],
-            }
-            trades.append(trade)
+        first = fills[0]
+        is_option = first["instrument_type"] == "option"
 
-        # Any SLD fills not consumed as exits are new short-open positions
-        for j, cl in enumerate(close_fills):
-            if j in used_closes:
-                continue
-            leg_group = str(cl.get("leg_group") or _uuid.uuid4())
-            trades.append({
-                "entry_date":      _to_date(cl["date"]),
-                "ticker":          cl["ticker"],
-                "quantity":        cl["quantity"],
-                "entry_price":     cl["price"],
+        # For options, use the permId that IB embeds as leg_group — all fills of the
+        # same spread order share the same permId, so spread legs link automatically.
+        perm_id   = next((f.get("leg_group") for f in fills if f.get("leg_group")), None)
+        leg_group = str(perm_id or _uuid.uuid4()) if is_option else None
+
+        def _trade_base(side: str, qty: float, price: float,
+                        open_fills: list[dict], n_fills: int) -> dict:
+            return {
+                "entry_date":      _to_date(open_fills[0]["date"]),
+                "ticker":          first["ticker"],
+                "quantity":        qty,
+                "entry_price":     price,
                 "exit_date":       None,
                 "exit_price":      None,
-                "notes":           f"Imported from IB (execId: {cl.get('exec_id', '')})",
+                "notes":           f"Imported from IB ({n_fills} fill{'s' if n_fills != 1 else ''})",
                 "stop_enabled":    False,
                 "opening_stop":    None,
                 "tag_ids":         [],
                 "current_stop":    None,
-                "instrument_type": cl["instrument_type"],
-                "expiration":      cl.get("expiration"),
-                "strike":          cl.get("strike"),
-                "option_type":     cl.get("option_type"),
-                "multiplier":      cl.get("multiplier", 1.0),
+                "instrument_type": first["instrument_type"],
+                "expiration":      first.get("expiration"),
+                "strike":          first.get("strike"),
+                "option_type":     first.get("option_type"),
+                "multiplier":      first.get("multiplier", 1.0),
                 "leg_group":       leg_group,
-                "leg_label":       f"Leg {len(open_fills) + j + 1}",
-                "side":            "short",
-            })
+                "leg_label":       None,   # filled in below for multi-leg groups
+                "side":            side,
+            }
+
+        if bot_fills:
+            bot_qty, bot_avg = _wagg(bot_fills)
+            t = _trade_base("long", bot_qty, bot_avg, bot_fills, len(bot_fills))
+            # If SLD fills are present they close the long
+            if sld_fills:
+                sld_qty, sld_avg = _wagg(sld_fills)
+                t["exit_date"]  = _to_date(sld_fills[-1]["date"])
+                t["exit_price"] = sld_avg
+            trades.append(t)
+
+        if sld_fills and not bot_fills:
+            # No BOT fills to consume — treat the SLD fills as a short-open position
+            sld_qty, sld_avg = _wagg(sld_fills)
+            trades.append(_trade_base("short", sld_qty, sld_avg, sld_fills, len(sld_fills)))
+
+    # ── Assign leg labels for multi-leg option groups ─────────────────────────
+    grp_indices: dict[str, list[int]] = defaultdict(list)
+    for i, t in enumerate(trades):
+        if t.get("leg_group"):
+            grp_indices[t["leg_group"]].append(i)
+
+    for grp, idxs in grp_indices.items():
+        if len(idxs) < 2:
+            continue
+        for idx in idxs:
+            t = trades[idx]
+            side_str = "Long"  if t["side"] == "long"  else "Short"
+            opt_str  = "Call"  if str(t.get("option_type") or "").lower().startswith("c") else "Put"
+            strike   = t.get("strike") or 0
+            t["leg_label"] = f"{side_str} {opt_str} ${strike:.2f}"
 
     return trades
