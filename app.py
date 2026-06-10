@@ -1,5 +1,6 @@
 import re
 import uuid
+import hmac
 import smtplib
 import concurrent.futures
 from email.mime.text import MIMEText
@@ -1985,6 +1986,43 @@ def import_trades_from_csv(df: pd.DataFrame) -> tuple[int, list[str]]:
 # ── App startup ────────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="Trade Log", layout="wide")
+
+
+# ── Password gate ────────────────────────────────────────────────────────────
+# Single shared password, stored in .streamlit/secrets.toml as `app_password`.
+# Runs before DB init and all UI: nothing renders until the password is entered.
+def _check_password():
+    if st.session_state.get("_authed"):
+        return True
+
+    expected = st.secrets.get("app_password") if hasattr(st, "secrets") else None
+    if not expected:
+        st.error(
+            "No password is configured. Set `app_password` in "
+            "`.streamlit/secrets.toml`, then restart the app."
+        )
+        return False
+
+    def _on_submit():
+        entered = st.session_state.get("_pw_input", "")
+        if hmac.compare_digest(str(entered), str(expected)):
+            st.session_state["_authed"] = True
+            del st.session_state["_pw_input"]
+        else:
+            st.session_state["_authed"] = False
+
+    st.text_input(
+        "Password", type="password", key="_pw_input",
+        on_change=_on_submit, placeholder="Enter password to continue",
+    )
+    if st.session_state.get("_authed") is False:
+        st.error("Incorrect password")
+    return False
+
+
+if not _check_password():
+    st.stop()
+
 
 # Run schema init + migrations only once per browser session (not on every rerun)
 if not st.session_state.get("_db_ready"):
