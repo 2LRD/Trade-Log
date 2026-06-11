@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 python -m streamlit run app.py
 ```
 
-Runs on port 8502 (configured in `.streamlit/config.toml`).
+Runs on port 8501 (configured in `.streamlit/config.toml`).
 
 ## Architecture
 
