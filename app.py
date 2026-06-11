@@ -7,6 +7,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import streamlit as st
 import streamlit.components.v1 as components
+import extra_streamlit_components as stx
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -1989,33 +1990,71 @@ st.set_page_config(page_title="Trade Log", layout="wide")
 
 
 # ── Password gate ────────────────────────────────────────────────────────────
-# Single shared password, stored in .streamlit/secrets.toml as `app_password`.
-# Runs before DB init and all UI: nothing renders until the password is entered.
-def _check_password():
-    if st.session_state.get("_authed"):
-        return True
+# Single shared password (secrets.toml: app_password). On a correct password we
+# set a signed SESSION cookie (signed with secrets.toml: secret_key) so page
+# refreshes don't re-prompt. The cookie has no expiry, so the browser clears it
+# when it closes — i.e. "remember within this browser session only".
+# Runs before DB init and all UI: nothing renders until authenticated.
+_AUTH_COOKIE = "tl_auth"
 
-    expected = st.secrets.get("app_password") if hasattr(st, "secrets") else None
-    if not expected:
+
+def _auth_token(secret_key):
+    return hmac.new(str(secret_key).encode(), b"trade-log-authed", "sha256").hexdigest()
+
+
+def _check_password():
+    expected_pw = st.secrets.get("app_password") if hasattr(st, "secrets") else None
+    secret_key  = st.secrets.get("secret_key", "") if hasattr(st, "secrets") else ""
+    if not expected_pw:
         st.error(
             "No password is configured. Set `app_password` in "
             "`.streamlit/secrets.toml`, then restart the app."
         )
         return False
 
-    def _on_submit():
-        entered = st.session_state.get("_pw_input", "")
-        if hmac.compare_digest(str(entered), str(expected)):
-            st.session_state["_authed"] = True
-            del st.session_state["_pw_input"]
-        else:
-            st.session_state["_authed"] = False
+    cookie_mgr = stx.CookieManager(key="_auth_cookie_mgr")
+    token = _auth_token(secret_key) if secret_key else None
 
-    st.text_input(
-        "Password", type="password", key="_pw_input",
-        on_change=_on_submit, placeholder="Enter password to continue",
-    )
-    if st.session_state.get("_authed") is False:
+    # Authenticated already this session → ensure the cookie is set, then proceed.
+    if st.session_state.get("_authed"):
+        if token and not st.session_state.get("_auth_cookie_set"):
+            cookie_mgr.set(_AUTH_COOKIE, token, key="_auth_cookie_set_op")
+            st.session_state["_auth_cookie_set"] = True
+        return True
+
+    # The cookie component returns {} on the first run of a session and delivers
+    # the real cookies on the next rerun. Wait one beat (blank screen) before
+    # deciding what to show — otherwise the login form flashes before the cookie
+    # arrives and the app loads.
+    if token and not st.session_state.get("_cookie_settled"):
+        st.session_state["_cookie_settled"] = True
+        st.stop()
+
+    # Returning within the same browser session: a valid signed cookie skips the prompt.
+    if token:
+        existing = cookie_mgr.get(_AUTH_COOKIE)
+        if existing and hmac.compare_digest(str(existing), token):
+            st.session_state["_authed"] = True
+            st.session_state["_auth_cookie_set"] = True
+            return True
+
+    # Use a form so submission is atomic (Enter or button) — avoids the
+    # on_change double-fire that a bare text_input + callback suffers from.
+    with st.form("_login_form", clear_on_submit=False):
+        pw = st.text_input(
+            "Password", type="password",
+            placeholder="Enter password to continue",
+        )
+        submitted = st.form_submit_button("Unlock")
+
+    if submitted:
+        if hmac.compare_digest(str(pw), str(expected_pw)):
+            st.session_state["_authed"] = True   # cookie is set on the next run
+            st.rerun()
+        else:
+            st.session_state["_auth_failed"] = True
+
+    if st.session_state.get("_auth_failed"):
         st.error("Incorrect password")
     return False
 

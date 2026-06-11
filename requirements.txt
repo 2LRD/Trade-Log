@@ -6,5 +6,6 @@ plotly>=5.0
 yfinance>=0.2
 openpyxl>=3.1
 Pillow>=10.0
+extra-streamlit-components>=0.1.80  # cookie manager for the login session cookie
 ib_insync>=0.9.86
 nest_asyncio>=1.5
