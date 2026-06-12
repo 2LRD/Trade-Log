@@ -1,6 +1,7 @@
 import re
 import uuid
 import hmac
+import logging
 import smtplib
 import concurrent.futures
 from email.mime.text import MIMEText
@@ -16,6 +17,8 @@ from pathlib import Path
 from db import init_db, get_connection, is_duplicate_trade, find_open_trade_id, find_open_trade_by_ticker_qty
 import ib_client as _ib_mod
 import updater as _upd
+
+_log = logging.getLogger("tradelog.prices")
 
 ATTACHMENTS_DIR = Path(__file__).parent / "attachments"
 ATTACHMENTS_DIR.mkdir(exist_ok=True)
@@ -437,7 +440,9 @@ def _yf_get_live_data(symbols: tuple) -> dict:
             # Multiple tickers → MultiIndex columns (ticker, field)
             for sym in symbols:
                 try:
-                    closes = raw["Close"][sym].dropna()
+                    # group_by="ticker" gives (ticker, field) MultiIndex columns,
+                    # so index symbol first, then the field.
+                    closes = raw[sym]["Close"].dropna()
                     if len(closes) >= 1:
                         price      = float(closes.iloc[-1])
                         prev_close = float(closes.iloc[-2]) if len(closes) >= 2 else price
@@ -456,14 +461,21 @@ def _yf_get_live_data(symbols: tuple) -> dict:
                 result[sym] = {"price": price, "prev_close": prev_close}
             else:
                 result[sym] = {"price": None, "prev_close": None}
-    except Exception:
-        # Per-ticker fallback
+    except Exception as exc:
+        # Batch download failed entirely — log it (this is the case that used to be
+        # swallowed silently) and retry each ticker individually.
+        _log.warning("yfinance batch download failed for %s: %r", list(symbols), exc)
         for t in symbols:
             try:
                 fi = yf.Ticker(t).fast_info
                 result[t] = {"price": fi.last_price, "prev_close": fi.previous_close}
-            except Exception:
+            except Exception as exc2:
+                _log.warning("yfinance per-ticker fetch failed for %s: %r", t, exc2)
                 result[t] = {"price": None, "prev_close": None}
+
+    no_data = [s for s in symbols if result.get(s, {}).get("price") is None]
+    if no_data:
+        _log.warning("No live price returned for: %s", ", ".join(no_data))
     return result
 
 
@@ -3544,6 +3556,14 @@ if page == "📋  Trading Log":
             st.session_state["_live_data_cache"] = live_data
             # Clear flag so subsequent reruns (column changes, etc.) don't re-fetch
             st.session_state["_live_prices_loaded"] = False
+            # Surface any symbols the data source couldn't price, instead of
+            # leaving a silent "—" the user can't distinguish from a bug.
+            _no_px = [s for s in live_symbols if live_data.get(s, {}).get("price") is None]
+            if _no_px:
+                st.warning(
+                    "No live price returned for: " + ", ".join(_no_px)
+                    + ". The market data source may be unavailable or the symbol unrecognized."
+                )
         else:
             live_data = st.session_state.get("_live_data_cache", {})
 
