@@ -182,10 +182,12 @@ def gen_stock_trade(conn, *, open_pos=False):
     position_size = random.uniform(5000, 20000)
     qty = max(1, round(position_size / ep / 10) * 10)  # round to nearest 10
 
-    # stop: 4–8% below for longs, above for shorts
+    # stop: 4–8% below entry for longs, above for shorts; opening stop is never edited
     stop_pct = random.uniform(0.04, 0.08)
     stop = round(ep * (1 - stop_pct) if side == "long" else ep * (1 + stop_pct), 2)
-    cur_stop = round(stop * random.uniform(0.98, 1.02), 2)
+    # current stop only ever trails toward entry (locking in), never loosens away from it
+    trail = random.uniform(0.0, 0.6)            # 0 = untouched, 1 = pulled up to entry
+    cur_stop = round(stop + (ep - stop) * trail, 2)
 
     commission = round(qty * 0.005, 2)
 
@@ -209,14 +211,20 @@ def gen_stock_trade(conn, *, open_pos=False):
         if xd >= TODAY:
             xd = bday(TODAY, -1)
 
-        # exit price: ~55% win-rate; chg is always a positive magnitude
+        # exit price: ~55% win-rate
         win = random.random() < 0.55
-        chg = random.uniform(0.01, 0.14) if win else random.uniform(0.005, 0.10)
-        if side == "long":
-            xp = round(ep * (1 + chg if win else 1 - chg), 2)
-        else:  # short: profit when price falls
-            xp = round(ep * (1 - chg if win else 1 + chg), 2)
-        xp = max(0.01, xp)
+        if win:
+            chg = random.uniform(0.01, 0.14)
+            xp = ep * (1 + chg) if side == "long" else ep * (1 - chg)
+        else:
+            # a loss never runs far past the stop — exit at/near the stop (with a touch
+            # of slippage) or a smaller discretionary loss between entry and the stop
+            frac = random.uniform(0.4, 1.05)    # 1.0 = right at the opening stop
+            if side == "long":
+                xp = ep - (ep - stop) * frac
+            else:  # short: loss when price rises toward the stop
+                xp = ep + (stop - ep) * frac
+        xp = round(max(0.01, xp), 2)
         trade_kw["exit_date"]  = iso(xd)
         trade_kw["exit_price"] = xp
 
