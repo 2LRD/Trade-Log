@@ -3063,7 +3063,7 @@ section[data-testid="stMain"]       {{ background: {t['bg_main']} !important; }}
 [data-testid="stMetric"] label {{ color: {t['text_dim']} !important; }}
 [data-testid="stMetricValue"] {{ color: {t['text_metric']} !important; }}
 
-h4, h5 {{ color: {t['text_heading']} !important; }}
+h1, h2, h3, h4, h5, h6 {{ color: {t['text_heading']} !important; }}
 hr {{ border-color: {t['hr']} !important; }}
 .stMarkdown p, p {{ color: {t['text_primary']}; }}
 [data-testid="stCaptionContainer"] p {{ color: {t['text_dim']} !important; }}
@@ -3116,6 +3116,25 @@ input, textarea, select,
 
 /* Main-area buttons (Reset, the Columns popover trigger, etc.) — keep them on-theme
    instead of falling back to Streamlit's fixed dark base. */
+/* Number-input +/- steppers — were falling back to Streamlit's dark base */
+[data-testid="stNumberInputStepUp"], [data-testid="stNumberInputStepDown"] {{
+    background: {t['bg_select']} !important;
+    color: {t['text_secondary']} !important;
+    border-color: {t['border_input']} !important;
+}}
+[data-testid="stNumberInputStepUp"]:hover, [data-testid="stNumberInputStepDown"]:hover {{
+    background: {t['option_hover']} !important;
+    color: {t['text_primary']} !important;
+}}
+
+/* File-uploader dropzone */
+[data-testid="stFileUploaderDropzone"] {{
+    background: {t['bg_select']} !important;
+    border-color: {t['border_input']} !important;
+}}
+[data-testid="stFileUploaderDropzoneInstructions"],
+[data-testid="stFileUploaderDropzoneInstructions"] * {{ color: {t['text_secondary']} !important; }}
+
 section[data-testid="stMain"] button[kind="secondary"] {{
     background: {t['bg_select']} !important;
     color: {t['text_primary']} !important;
