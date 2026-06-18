@@ -3056,7 +3056,7 @@ section[data-testid="stMain"]       {{ background: {t['bg_main']} !important; }}
 [data-testid="stSidebar"] .stButton button[kind="primary"] {{ background: {t['nav_active_bg']} !important; color: {t['nav_active_text']} !important; }}
 
 [data-testid="stExpander"] {{ background: {t['bg_expander']} !important; border-color: {t['border']} !important; }}
-[data-testid="stExpander"] summary {{ color: {t['text_secondary']} !important; }}
+[data-testid="stExpander"] summary {{ color: {t['text_secondary']} !important; background: {t['bg_expander']} !important; }}
 [data-testid="stExpander"] summary svg {{ fill: {t['text_secondary']} !important; }}
 
 [data-testid="stMetric"] {{ background: {t['bg_card']} !important; border-color: {t['border']} !important; }}
@@ -3113,6 +3113,19 @@ input, textarea, select,
 [data-testid="stTabs"] button[aria-selected="true"] {{ color: {t['accent']} !important; border-bottom-color: {t['accent']} !important; }}
 
 [data-testid="stPopover"] > div {{ background: {t['bg_expander']} !important; border-color: {t['border']} !important; }}
+
+/* Main-area buttons (Reset, the Columns popover trigger, etc.) — keep them on-theme
+   instead of falling back to Streamlit's fixed dark base. */
+section[data-testid="stMain"] button[kind="secondary"] {{
+    background: {t['bg_select']} !important;
+    color: {t['text_primary']} !important;
+    border-color: {t['border_input']} !important;
+}}
+section[data-testid="stMain"] button[kind="secondary"]:hover {{
+    background: {t['option_hover']} !important;
+    color: {t['text_primary']} !important;
+    border-color: {t['accent']} !important;
+}}
 </style>
 """
 
@@ -6078,8 +6091,12 @@ if page == "📋  Trading Log":
                     xaxis_rangeslider_visible=False,
                     hovermode="x unified",
                     height=600,
+                    # Match the active app theme instead of Streamlit's fixed dark base
+                    paper_bgcolor=_CHT_BG, plot_bgcolor=_CHT_BG,
+                    font=dict(color=_CHT_FONT),
                     # Price candles occupy the top ~75%; volume sits in the bottom panel
-                    yaxis=dict(domain=[0.26, 1.0], title="Price"),
+                    xaxis=dict(gridcolor=_CHT_GRID),
+                    yaxis=dict(domain=[0.26, 1.0], title="Price", gridcolor=_CHT_GRID),
                     yaxis3=dict(
                         domain=[0.0, 0.18], title="Volume",
                         showgrid=False, side="left",
