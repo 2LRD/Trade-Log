@@ -41,6 +41,7 @@ ROOT_FILES = [
     "db.py",
     "ib_client.py",
     "updater.py",
+    "launch.py",
     "requirements.txt",
     "VERSION",
 ]

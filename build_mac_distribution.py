@@ -100,11 +100,11 @@ fi
 # ── Kill any stale Streamlit on this port ───────────────────────────────────
 lsof -ti ":$PORT" | xargs kill -9 2>/dev/null || true
 
-# ── Launch Streamlit (background) ────────────────────────────────────────────
-"$VENV_DIR/bin/python" -m streamlit run "$RESOURCES_DIR/app.py" \
-    --server.port "$PORT" \
-    --server.headless true \
-    --browser.gatherUsageStats false &
+# ── Launch Streamlit via the supervisor (background) ─────────────────────────
+# launch.py picks a light/dark theme base matching the saved theme and relaunches
+# Streamlit when the app requests a restart. On Quit we send it SIGTERM (below)
+# and it tears down its Streamlit child.
+"$VENV_DIR/bin/python" "$RESOURCES_DIR/launch.py" --port "$PORT" --no-browser &
 STREAMLIT_PID=$!
 
 # ── Open browser once Streamlit is ready ─────────────────────────────────────
@@ -157,6 +157,7 @@ SOURCE_FILES = [
     "db.py",
     "ib_client.py",
     "updater.py",
+    "launch.py",
     "requirements.txt",
     "VERSION",
 ]

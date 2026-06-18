@@ -10,6 +10,18 @@ python -m streamlit run app.py
 
 Runs on port 8502 (configured in `.streamlit/config.toml`).
 
+For the full production behavior, the app is launched via `launch.py` (what the
+`.bat`/`.sh` launchers call). `launch.py` is a supervisor: it reads the saved
+`app_theme`, passes a matching light/dark `--theme.base` to Streamlit so the
+canvas data tables (`st.dataframe`/`st.data_editor`, which can't be re-themed via
+CSS at runtime) match the theme, and relaunches Streamlit when the app requests a
+restart. The restart is requested from Settings → Theme when the user crosses the
+light/dark line: app.py writes a `.restart_requested` sentinel and calls
+`os._exit(0)`; the supervisor sees the sentinel and relaunches; the browser tab
+reloads itself. Running `streamlit run app.py` directly still works for dev — you
+just lose the launch-time table theming and the auto-restart (it falls back to a
+"applies on next launch" message).
+
 ## Architecture
 
 Two-file app: `db.py` handles all persistence, `app.py` is the entire UI.

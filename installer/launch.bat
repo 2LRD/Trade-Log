@@ -68,7 +68,9 @@ echo.
 start /min "" cmd /c "timeout /t 5 /nobreak >nul & start http://localhost:%PORT%"
 
 :: ── Run Trade Log (keeps this window open until it stops) ────────────────────
-"%PYTHON%" -m streamlit run "%~dp0app.py" --server.port %PORT% --server.headless true --browser.gatherUsageStats false
+:: launch.py supervises Streamlit: it picks a light/dark theme base matching the
+:: saved theme, and relaunches automatically when the app requests a restart.
+"%PYTHON%" "%~dp0launch.py" --port %PORT% --no-browser
 
 echo.
 echo  Trade Log has stopped. You can close this window.

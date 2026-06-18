@@ -43,3 +43,6 @@ desktop.ini
 .env
 .env.local
 .streamlit/secrets.toml
+
+# Trade Log launcher restart sentinel
+.restart_requested

@@ -1,4 +1,5 @@
 import re
+import os
 import math
 import time as _time_global
 import uuid
@@ -2764,6 +2765,14 @@ euro_dates = settings.get("euro_dates", "0") == "1"
 # ── Active theme + chart color shorthands ─────────────────────────────────────
 _theme_key    = settings.get("app_theme", "ocean_dark")
 _TH           = THEMES.get(_theme_key, THEMES["ocean_dark"])
+
+# Light/dark family of each theme. The data tables (Streamlit canvas grids) are
+# fixed to the light/dark base chosen at launch by launch.py, so crossing this
+# line at runtime requires a relaunch — see the Settings → Theme handler.
+_THEME_FAMILY = {
+    "ocean_dark": "dark", "midnight": "dark", "forest": "dark",
+    "light": "light", "warm_sand": "light",
+}
 _CHT_BG       = _TH["chart_bg"]
 _CHT_GRID     = _TH["chart_grid"]
 _CHT_FONT     = _TH["chart_font"]
@@ -9763,10 +9772,67 @@ elif page == "⚙️  Settings":
             horizontal=True,
         )
         if st.form_submit_button("💾  Save Theme", width='stretch'):
-            set_setting("app_theme", _theme_options[_new_theme_idx])
+            _picked = _theme_options[_new_theme_idx]
+            set_setting("app_theme", _picked)
             _bust("_v_settings")
-            st.success(f"Theme set to {_theme_labels[_new_theme_idx]}. Reloading…")
+            # Everything but the data tables recolors instantly via CSS. The
+            # tables follow the light/dark base chosen at launch, so crossing the
+            # light<->dark line needs a relaunch (handled below).
+            _running_base = (st.get_option("theme.base") or "dark").lower()
+            _new_family   = _THEME_FAMILY.get(_picked, "dark")
+            if _new_family != _running_base:
+                st.session_state["_theme_restart_pending"] = _theme_labels[_new_theme_idx]
             st.rerun()
+
+    # Restart prompt — only when the light/dark family changed so the data tables
+    # can be recolored to match. Auto-relaunch works when launched via launch.py.
+    if st.session_state.get("_theme_restart_pending"):
+        _rs_lbl = st.session_state["_theme_restart_pending"]
+        _supervised = os.environ.get("TRADELOG_SUPERVISED") == "1"
+        if st.session_state.get("_theme_restart_running"):
+            st.info("🔄  Restarting Trade Log… this page will refresh automatically "
+                    "in a few seconds.")
+            # Poll the server; once it goes down and comes back up, reload the tab.
+            st.iframe(
+                "<script>(function(){var p=window.parent,o=p.location.origin,down=false;"
+                "function poll(){fetch(o+'/',{cache:'no-store',mode:'no-cors'})"
+                ".then(function(){if(down){p.location.reload();}else{setTimeout(poll,500);}})"
+                ".catch(function(){down=true;setTimeout(poll,500);});}"
+                "setTimeout(poll,1000);})();</script>",
+                height=0,
+            )
+            # Kill this server shortly after the script flushes; launch.py relaunches.
+            if not st.session_state.get("_restart_thread_started"):
+                st.session_state["_restart_thread_started"] = True
+                import threading as _threading
+                def _delayed_restart():
+                    _time_global.sleep(1.5)
+                    try:
+                        (Path(__file__).resolve().parent / ".restart_requested").touch()
+                    except Exception:
+                        pass
+                    os._exit(0)
+                _threading.Thread(target=_delayed_restart, daemon=True).start()
+        elif _supervised:
+            st.warning(
+                f"**{_rs_lbl}** is a different (light/dark) theme family. The data "
+                "tables need a quick restart to recolor to match — everything else "
+                "has already updated."
+            )
+            _rc1, _rc2 = st.columns(2)
+            if _rc1.button("🔄  Restart now", type="primary", width='stretch',
+                           key="theme_restart_now"):
+                st.session_state["_theme_restart_running"] = True
+                st.rerun()
+            if _rc2.button("Later", width='stretch', key="theme_restart_later"):
+                st.session_state.pop("_theme_restart_pending", None)
+                st.rerun()
+        else:
+            st.info(
+                f"**{_rs_lbl}** applied. The data tables will match the new "
+                "light/dark theme the next time you start Trade Log."
+            )
+            st.session_state.pop("_theme_restart_pending", None)
 
     st.divider()
 
