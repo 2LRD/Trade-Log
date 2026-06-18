@@ -6036,6 +6036,9 @@ if page == "📋  Trading Log":
                         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                                     xanchor="left", x=0),
                     )
+                # Collapse non-trading days (weekends) so the chart tracks like a
+                # standard trading chart instead of showing flat weekend gaps.
+                fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
                 st.plotly_chart(fig, width='stretch')
 
             # ── Chart notes ───────────────────────────────────────────────────
