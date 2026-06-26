@@ -300,23 +300,60 @@ def fetch_flex_report(token: str, query_id: str) -> dict:
     error), so we use exponential back-off: 10, 15, 20, 30, 45 s between attempts.
     """
     try:
-        # Step 1 — trigger report generation
-        req1 = urllib.request.Request(
-            _FLEX_SEND_URL.format(token=token, query_id=query_id),
-            headers=_FLEX_HEADERS,
-        )
-        with urllib.request.urlopen(req1, timeout=30) as resp:
-            xml1 = resp.read().decode("utf-8")
+        # Step 1 — trigger report generation, with retry on transient errors.
+        # Account-level sections (NAV / Cash Report / Deposits & Withdrawals)
+        # are only finalised by IB's end-of-day statement generation, so when
+        # the query period includes the current (incomplete) day IB answers
+        # SendRequest with 1009 "Statement is incomplete at this time. Please
+        # try again shortly." It says retry, so we do — but the underlying
+        # cause is usually the query period, so we surface that hint if all
+        # the retries are exhausted. (Trades are available intraday, which is
+        # why a trades-only query never hits this.)
+        step1_waits = [0, 8, 15, 25]  # first attempt immediate, then back off
+        root1 = None
+        last_step1_err = "Step 1 failed."
+        for wait in step1_waits:
+            if wait:
+                time.sleep(wait)
+            req1 = urllib.request.Request(
+                _FLEX_SEND_URL.format(token=token, query_id=query_id),
+                headers=_FLEX_HEADERS,
+            )
+            with urllib.request.urlopen(req1, timeout=30) as resp:
+                xml1 = resp.read().decode("utf-8")
 
-        try:
-            root1 = ET.fromstring(xml1)
-        except ET.ParseError:
-            return _FLEX_EMPTY(f"Could not parse step-1 response: {xml1[:300]}")
+            try:
+                root1 = ET.fromstring(xml1)
+            except ET.ParseError:
+                return _FLEX_EMPTY(f"Could not parse step-1 response: {xml1[:300]}")
 
-        status = root1.findtext("Status") or ""
-        if status != "Success":
-            msg = root1.findtext("ErrorMessage") or xml1[:300]
-            return _FLEX_EMPTY(f"IB rejected the request: {msg}")
+            status = root1.findtext("Status") or ""
+            if status == "Success":
+                break
+
+            msg      = root1.findtext("ErrorMessage") or xml1[:300]
+            err_code = (root1.findtext("ErrorCode") or "").strip()
+            transient = (
+                err_code == "1009"
+                or "incomplete" in msg.lower()
+                or "try again" in msg.lower()
+                or "in progress" in msg.lower()
+            )
+            last_step1_err = f"IB rejected the request: {msg}"
+            if not transient:
+                return _FLEX_EMPTY(last_step1_err)
+            # transient — loop and retry SendRequest after backing off
+        else:
+            # exhausted all retries while still getting a transient error
+            return _FLEX_EMPTY(
+                last_step1_err
+                + "\n\nThis usually means the Flex Query's reporting period "
+                "includes today, whose account statement IB hasn't finished "
+                "generating yet. Edit the query in IB (Reports → Flex Queries) "
+                "and set the Period to 'Last Business Day' (or a fixed prior "
+                "date range), or try again after IB generates the daily "
+                "statement (typically the next morning, US ET)."
+            )
 
         ref_code = (root1.findtext("ReferenceCode") or "").strip()
         stmt_url  = (root1.findtext("Url") or "").strip()

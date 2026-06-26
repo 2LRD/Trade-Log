@@ -4,6 +4,14 @@ title Trade Log — First-Time Setup
 color 0A
 cd /d "%~dp0"
 
+:: ── Force uv to copy, never hardlink ─────────────────────────────────────────
+:: OneDrive / Dropbox / Google Drive sync turns folders into cloud placeholders,
+:: and hardlinking into (or out of) those fails with "os error 396". Copy mode
+:: sidesteps it entirely. We also park uv's cache in a local temp dir so neither
+:: side of the install touches a synced location.
+set "UV_LINK_MODE=copy"
+set "UV_CACHE_DIR=%TEMP%\uv_cache_tradelog"
+
 echo.
 echo  ============================================================
 echo   Trade Log — First-Time Setup
@@ -33,21 +41,24 @@ if exist "%~dp0.venv\Scripts\python.exe" (
     pause & exit /b 0
 )
 
-:: ── Guard: OneDrive path? ────────────────────────────────────────────────────
-echo "%~dp0" | findstr /i "OneDrive" >nul
+:: ── Guard: cloud-synced path? ────────────────────────────────────────────────
+:: Catches OneDrive in the path, and also the common case where the whole user
+:: profile (or its Downloads/Documents) is backed up by OneDrive — those paths
+:: don't contain "OneDrive" but still sit under the cloud filter. With copy mode
+:: forced above this is usually harmless now, but warn anyway.
+echo "%~dp0" | findstr /i "OneDrive \\Downloads\\ \\Documents\\" >nul
 if not errorlevel 1 (
-    echo  [WARNING] This folder appears to be inside OneDrive.
+    echo  [WARNING] This folder appears to be inside a cloud-synced
+    echo            location ^(OneDrive / Downloads / Documents^).
     echo.
-    echo  OneDrive syncing can interfere with the Python installation
-    echo  and cause it to fail or behave unpredictably.
+    echo  Cloud syncing can interfere with the Python installation.
+    echo  This installer now forces copy mode to work around it, but for
+    echo  best results move the "Trade Log" folder somewhere NOT synced:
     echo.
-    echo  RECOMMENDED: Move the "Trade Log" folder somewhere outside
-    echo  OneDrive first, such as:
+    echo    C:\TradeLog\
     echo.
-    echo    C:\Users\%USERNAME%\Trade Log\
-    echo.
-    echo  Press any key to try installing here anyway (may not work),
-    echo  or close this window and move the folder first.
+    echo  Press any key to try installing here anyway, or close this
+    echo  window and move the folder first.
     echo.
     pause
 )

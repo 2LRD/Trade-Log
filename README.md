@@ -53,7 +53,16 @@ Trade Log is a self-hosted trading journal. You log trades manually or import th
 
 ## Installation
 
-**If you received the installer package**, just double-click `INSTALL - Double-Click This First.bat` and follow the prompts. Skip to [Running the App](#running-the-app).
+**If you received the installer package (Windows)**, just double-click `INSTALL - Double-Click This First.bat` and follow the prompts. Skip to [Running the App](#running-the-app).
+
+**If you received the Mac package (`Trade Log Mac.tar.gz`):**
+
+1. Double-click the `.tar.gz` to extract it, then open the `Trade Log Mac` folder.
+2. Double-click `Trade Log.app`. The first launch installs everything it needs (~1–2 minutes) — no Python required.
+   - macOS security prompt: right-click `Trade Log.app` → **Open** → **Open** (on macOS Sequoia, allow it via System Settings → Privacy & Security → **Open Anyway**).
+3. Your browser opens Trade Log automatically. Click **Quit** in the dialog to stop the app.
+
+> **If the app won't open** (e.g. you see *"Could not create a Python environment"*), double-click **`Open Trade Log (if the app won't open).command`** in the same folder instead. It runs the identical app from a Terminal window, which avoids a macOS launch-environment quirk that affects some setups. (First time: if macOS says it "cannot verify the developer," right-click the file → **Open** → **Open**.) See [The app won't open on Mac](#the-app-wont-open-on-mac) for details.
 
 **If you are setting up from source:**
 
@@ -546,6 +555,15 @@ If the automatic fetch is not working, you can download the report manually:
 - Make sure the terminal window that you launched the app from is still open
 - Try opening `http://localhost:8502` manually in your browser
 - Check that port 8502 is not being used by another program
+
+### The app won't open on Mac
+If double-clicking `Trade Log.app` shows an error such as *"Could not create a Python environment. Please try again."*:
+
+1. **Use the backup launcher.** In the same folder as the app, double-click **`Open Trade Log (if the app won't open).command`**. It runs the exact same app from a Terminal window, which sidesteps a Finder launch-environment quirk that breaks first-run setup on some Macs. The first time, macOS may say it "cannot verify the developer" — right-click the file → **Open** → **Open**.
+2. **Check the setup log.** If first-run setup fails, the actual error is written to `~/Library/Logs/Trade Log Setup.log`. Open it (Finder → Go → Go to Folder → paste the path) to see what went wrong, or include it when reporting the problem.
+3. **Last-resort manual launch.** You can also right-click `Trade Log.app` → **Show Package Contents** → **Contents → MacOS** → double-click `launcher`. The backup `.command` above does this for you in one click.
+
+The first launch needs an internet connection — it downloads a private copy of Python 3.12 and the app's dependencies. You do **not** need any system Python installed (and the version you have installed does not matter).
 
 ### Live prices are not loading
 - Click **⚡ REFRESH LIVE PRICES** in the sidebar — prices do not auto-load

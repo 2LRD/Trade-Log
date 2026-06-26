@@ -1188,6 +1188,86 @@ def _cached_load_equity_entries(_v: int) -> list:
 def _cached_load_trading_plans(_v: int) -> list:
     return load_trading_plans()
 
+
+def _plan_by_id(plans: list[dict], plan_id) -> dict | None:
+    """Find a plan dict by id within an already-loaded plan list."""
+    if plan_id is None or (isinstance(plan_id, float) and pd.isna(plan_id)):
+        return None
+    try:
+        pid = int(plan_id)
+    except (TypeError, ValueError):
+        return None
+    return next((p for p in plans if int(p["id"]) == pid), None)
+
+
+def _plan_link_label(p: dict) -> str:
+    """One-line label for a plan in a selectbox."""
+    _saved = str(p.get("saved_at") or "")[:10]
+    _tt    = p.get("trade_type") or p.get("sentiment") or ""
+    _bits  = [str(p.get("ticker") or "—")]
+    if _tt:
+        _bits.append(str(_tt))
+    if _saved:
+        _bits.append(f"saved {_saved}")
+    return "  ·  ".join(_bits) + f"  (#{p['id']})"
+
+
+def _plan_summary_md(p: dict) -> str:
+    """Compact markdown summary of a plan — shown when one is linked to a trade."""
+    def _px(v):
+        try:
+            return fmt_price(float(v))
+        except (TypeError, ValueError):
+            return None
+    rows = []
+    if p.get("sentiment"):     rows.append(f"**Bias:** {p['sentiment']}")
+    if p.get("trade_type"):    rows.append(f"**Type:** {p['trade_type']}")
+    if p.get("hold_time"):     rows.append(f"**Hold:** {p['hold_time']}")
+    _ep, _pt, _sl = _px(p.get("entry_price")), _px(p.get("profit_target")), _px(p.get("stop_loss"))
+    if _ep: rows.append(f"**Planned entry:** {_ep}")
+    if _pt: rows.append(f"**Target:** {_pt}")
+    if _sl: rows.append(f"**Stop:** {_sl}")
+    if p.get("rr_ratio"):
+        try:
+            rows.append(f"**R:R:** {float(p['rr_ratio']):.2f}")
+        except (TypeError, ValueError):
+            pass
+    head = f"📝 **Plan #{p['id']} — {p.get('ticker') or '—'}**"
+    body = "  ·  ".join(rows)
+    extra = ""
+    if p.get("rationale"):
+        extra = f"\n\n*{str(p['rationale']).strip()}*"
+    md = head + ("\n\n" + body if body else "") + extra
+    # Escape '$' so Streamlit's markdown doesn't treat price pairs as LaTeX math
+    # (e.g. "$76.50 ... $146.00" would render the span between as an equation).
+    return md.replace("$", "\\$")
+
+
+def _plan_note_text(p: dict) -> str:
+    """Plain-text plan summary suitable for prefilling a trade's Notes field."""
+    def _px(v):
+        try:
+            return fmt_price(float(v))
+        except (TypeError, ValueError):
+            return None
+    parts = [f"From plan #{p['id']} ({p.get('ticker') or '—'})"]
+    line = []
+    _ep, _pt, _sl = _px(p.get("entry_price")), _px(p.get("profit_target")), _px(p.get("stop_loss"))
+    if _ep: line.append(f"entry {_ep}")
+    if _pt: line.append(f"target {_pt}")
+    if _sl: line.append(f"stop {_sl}")
+    if p.get("rr_ratio"):
+        try:
+            line.append(f"R:R {float(p['rr_ratio']):.2f}")
+        except (TypeError, ValueError):
+            pass
+    if line:
+        parts.append(" · ".join(line))
+    if p.get("rationale"):
+        parts.append(str(p["rationale"]).strip())
+    return "\n".join(parts)
+
+
 def _bust(*keys: str):
     """Increment one or more version counters so the next render re-queries."""
     for k in keys:
@@ -1569,7 +1649,7 @@ def load_trades() -> pd.DataFrame:
                 t.multiplier, t.leg_group, t.leg_label, t.side,
                 t.chart_notes, t.earnings_date,
                 t.commission, t.underlying_price_at_entry,
-                t.account_name, t.roll_group,
+                t.account_name, t.roll_group, t.exchange, t.plan_id,
                 GROUP_CONCAT(tg.name, ', ') AS tags
             FROM trades t
             LEFT JOIN trade_tags tt ON tt.trade_id = t.id
@@ -1643,8 +1723,9 @@ def save_trading_plan(plan: dict) -> int:
             """INSERT INTO trading_plans
                (ticker, sentiment, rationale, fundamentals, technicals,
                 trade_type, hold_time, entry_signal, confirm1, confirm2,
-                entry_price, profit_target, stop_loss, rr_ratio)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                entry_price, profit_target, stop_loss, rr_ratio,
+                instrument, expiration, strike, delta_target, notes)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 plan.get("ticker"), plan.get("sentiment"), plan.get("rationale"),
                 plan.get("fundamentals"), plan.get("technicals"),
@@ -1652,6 +1733,8 @@ def save_trading_plan(plan: dict) -> int:
                 plan.get("entry_signal"), plan.get("confirm1"), plan.get("confirm2"),
                 plan.get("entry_price"), plan.get("profit_target"),
                 plan.get("stop_loss"), plan.get("rr_ratio"),
+                plan.get("instrument"), plan.get("expiration"),
+                plan.get("strike"), plan.get("delta_target"), plan.get("notes"),
             ),
         )
         return cur.lastrowid
@@ -1733,7 +1816,7 @@ def add_trade(entry_date, ticker, quantity, entry_price, exit_date, exit_price,
               spread_type=None, commission=0.0, underlying_price_at_entry=None,
               account_name="Default", roll_group=None,
               native_currency="USD", fx_rate_entry=1.0, fx_rate_exit=1.0,
-              trail_type="fixed", trail_amount=None, exchange="") -> int:
+              trail_type="fixed", trail_amount=None, exchange="", plan_id=None) -> int:
     with get_connection() as conn:
         cs = current_stop if current_stop is not None else (opening_stop if stop_enabled else None)
         cur = conn.execute("""
@@ -1744,8 +1827,8 @@ def add_trade(entry_date, ticker, quantity, entry_price, exit_date, exit_price,
                                 multiplier, leg_group, leg_label, side, spread_type,
                                 commission, underlying_price_at_entry, account_name, roll_group,
                                 native_currency, fx_rate_entry, fx_rate_exit,
-                                trail_type, trail_amount, exchange)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                trail_type, trail_amount, exchange, plan_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             entry_date.isoformat() if entry_date else None,
             ticker.upper().strip(),
@@ -1776,6 +1859,7 @@ def add_trade(entry_date, ticker, quantity, entry_price, exit_date, exit_price,
             trail_type or "fixed",
             float(trail_amount) if trail_amount else None,
             exchange or "",
+            int(plan_id) if plan_id else None,
         ))
         trade_id = cur.lastrowid
         for tid in tag_ids:
@@ -1790,12 +1874,15 @@ def add_trade(entry_date, ticker, quantity, entry_price, exit_date, exit_price,
         return trade_id
 
 
+_UNCHANGED = object()  # sentinel so update_trade can distinguish "leave as-is" from "set NULL"
+
+
 def update_trade(trade_id, exit_date, exit_price, notes, current_stop, stop_enabled, tag_ids,
                  entry_date=None, ticker=None, quantity=None, entry_price=None,
                  opening_stop=None, instrument_type=None, expiration=None,
                  strike=None, option_type=None, multiplier=None, side=None,
                  commission=None, account_name=None,
-                 trail_type=None, trail_amount=None):
+                 trail_type=None, trail_amount=None, plan_id=_UNCHANGED):
     with get_connection() as conn:
         # Build the update dynamically — only overwrite fields that were passed
         sets = [
@@ -1853,6 +1940,9 @@ def update_trade(trade_id, exit_date, exit_price, notes, current_stop, stop_enab
         if trail_amount is not None:
             sets.append("trail_amount=?")
             vals.append(float(trail_amount))
+        if plan_id is not _UNCHANGED:
+            sets.append("plan_id=?")
+            vals.append(int(plan_id) if plan_id else None)
         vals.append(trade_id)
         conn.execute(f"UPDATE trades SET {', '.join(sets)} WHERE id=?", vals)
         conn.execute("DELETE FROM trade_tags WHERE trade_id=?", (trade_id,))
@@ -3877,6 +3967,8 @@ if page == "📋  Trading Log":
         # the form (so clear_on_submit can't reach it) and deleting its key doesn't
         # reliably reset a text_input. A fresh key = a brand-new, empty widget.
         st.session_state["_add_tk_seed"] = st.session_state.get("_add_tk_seed", 0) + 1
+        # Reset the optional plan link back to "none" for the next entry.
+        st.session_state.pop("add_link_plan", None)
         _trade_added_dialog(_just_added)
 
     with st.expander("➕  Add Trade", expanded=False):
@@ -3953,6 +4045,23 @@ if page == "📋  Trading Log":
                     _sym_hint = f" ({_at_yf_sym})" if _at_yf_sym != _at_ticker else ""
                     _tlk2.caption(f"No price found{_sym_hint} — check the ticker or exchange code.")
 
+        # ── Optional: link a saved trading plan ───────────────────────────────
+        # Outside the form so picking a plan reacts immediately — it shows the
+        # plan summary and pre-fills the Notes field below.
+        _add_plans     = _cached_load_trading_plans(st.session_state["_v_plans"])
+        _add_plan_opts = ["— None —"] + [_plan_link_label(p) for p in _add_plans]
+        _add_plan_choice = st.selectbox(
+            "🔗 Link a trade plan (optional)", _add_plan_opts, key="add_link_plan",
+            help="Pulls the plan's summary into this trade and records the link.",
+        )
+        _add_sel_plan = None
+        if _add_plan_choice != "— None —" and _add_plan_choice in _add_plan_opts:
+            _add_sel_plan = _add_plans[_add_plan_opts.index(_add_plan_choice) - 1]
+        _add_plan_id           = int(_add_sel_plan["id"]) if _add_sel_plan else None
+        _add_plan_note_prefill = _plan_note_text(_add_sel_plan) if _add_sel_plan else ""
+        if _add_sel_plan:
+            st.info(_plan_summary_md(_add_sel_plan))
+
         with st.form("add_trade", clear_on_submit=True):
             inst   = st.session_state.get("add_inst_type", "Stock")
             n_legs = max(1, int(st.session_state.get("add_num_legs", 1))) if inst != "Stock" else 1
@@ -3983,7 +4092,7 @@ if page == "📋  Trading Log":
                 c5, c6 = st.columns(2)
                 exit_date  = c5.date_input("Exit Date", value=None)
                 exit_price = c6.number_input("Exit Price", min_value=0.0, step=0.01, format="%.2f", value=None)
-                notes = st.text_area("Notes", height=68,
+                notes = st.text_area("Notes", height=68, value=_add_plan_note_prefill,
                                      placeholder="Trade thesis, setup, how it played out…")
                 with st.expander("Advanced", expanded=False):
                     ca1, ca2 = st.columns(2)
@@ -4050,7 +4159,7 @@ if page == "📋  Trading Log":
                 opt_exit_dt    = oe1.date_input("Exit Date (all legs)", value=None)
                 opt_exit_price = oe2.number_input("Exit Price", min_value=0.0, step=0.01, format="%.2f", value=None)
                 sel_tag_names  = st.multiselect("Tags", options=list(tag_name_to_id.keys()), key="add_opt_tags")
-                notes = st.text_area("Notes", height=68,
+                notes = st.text_area("Notes", height=68, value=_add_plan_note_prefill,
                                      placeholder="Trade thesis, setup, how it played out…")
                 with st.expander("Advanced", expanded=False):
                     oa1, oa2, oa3 = st.columns(3)
@@ -4076,7 +4185,7 @@ if page == "📋  Trading Log":
                 exit_date    = fe2.date_input("Exit Date", value=None)
                 exit_price   = st.number_input("Exit Price", min_value=0.0, step=0.01, format="%.2f", value=None)
                 sel_tag_names = st.multiselect("Tags", options=list(tag_name_to_id.keys()), key="add_fut_tags")
-                notes = st.text_area("Notes", height=68,
+                notes = st.text_area("Notes", height=68, value=_add_plan_note_prefill,
                                      placeholder="Trade thesis, setup, how it played out…")
                 with st.expander("Advanced", expanded=False):
                     fa1, fa2 = st.columns(2)
@@ -4122,6 +4231,7 @@ if page == "📋  Trading Log":
                                 trail_type=_add_trail_type,
                                 trail_amount=float(_add_trail_amount) if _add_trail_amount else None,
                                 exchange=stock_exchange or "",
+                                plan_id=_add_plan_id,
                             )
                             for f in (uploaded_files or []):
                                 save_attachment(new_id, f)
@@ -4177,6 +4287,7 @@ if page == "📋  Trading Log":
                                     commission     = float(opt_commission) if opt_commission else 0.0,
                                     underlying_price_at_entry = float(opt_underlying_px) if opt_underlying_px else None,
                                     account_name   = opt_account,
+                                    plan_id        = _add_plan_id,
                                 )
                                 added += 1
                             if added:
@@ -4215,6 +4326,7 @@ if page == "📋  Trading Log":
                                 multiplier=float(fut_mult),
                                 commission=float(fut_commission) if fut_commission else 0.0,
                                 account_name=fut_account,
+                                plan_id=_add_plan_id,
                             )
                             st.session_state["_trade_added"] = {
                                 "title": f"{t} futures trade added to your log.",
@@ -4516,6 +4628,83 @@ if page == "📋  Trading Log":
     if trades.empty:
         st.info("No trades yet. Use the form above to add your first trade.")
     else:
+
+        # ── Open Positions — quick close ────────────────────────────────────────
+        # Close any open trade in one place without hunting for it in the table.
+        _open_pos = trades[trades["exit_date"].isna()].copy()
+        with st.expander(f"📌  Open Positions ({len(_open_pos)})", expanded=not _open_pos.empty):
+            if _open_pos.empty:
+                st.caption("No open positions.")
+            else:
+                st.caption("Enter an exit price and click Close — exit date defaults to today. "
+                           "Live price (stocks) pre-fills the exit field.")
+                _close_today = pd.Timestamp.today().date()
+                for _, _op in _open_pos.iterrows():
+                    _opid   = int(_op["id"])
+                    _opinst = str(_op.get("instrument_type") or "stock").lower()
+                    _opqty  = float(_op["quantity"]) if _op.get("quantity") else 0.0
+                    _opep   = float(_op["entry_price"]) if _op.get("entry_price") else 0.0
+                    _opmult = float(_op.get("multiplier") or 1.0)
+                    _opside = str(_op.get("side") or "long").lower()
+                    _opexch = str(_op.get("exchange") or "")
+                    # Live price + unrealized P&L for stocks only (options/futures
+                    # need the contract quote, which a plain symbol lookup can't give).
+                    _oplive = _get_single_live_price(str(_op["ticker"]), _opexch) if _opinst == "stock" else None
+                    _opupnl = None
+                    if _oplive is not None and _opqty and _opep:
+                        _raw = (_oplive - _opep) * _opqty * _opmult
+                        _opupnl = -_raw if _opside == "short" else _raw
+
+                    with st.form(f"close_pos_{_opid}", clear_on_submit=False):
+                        cpa, cpb, cpc, cpd, cpe = st.columns([2.1, 0.9, 1.3, 1.3, 1.4])
+                        _lbl = f"**{_op['ticker']}**" + (f" · {_opinst}" if _opinst != "stock" else "")
+                        cpa.markdown(
+                            f"{_lbl}<br><span style='color:#888;font-size:0.85rem'>"
+                            f"{fmt_qty(_opqty)} @ {fmt_price(_opep)} · {fmt_date(_op['entry_date'], euro_dates)}"
+                            f"</span>",
+                            unsafe_allow_html=True,
+                        )
+                        _live_txt = fmt_price(_oplive) if _oplive is not None else "—"
+                        cpb.markdown(
+                            f"<div style='padding-top:4px;font-size:0.8rem;color:#888'>Live</div>"
+                            f"<div style='font-weight:700'>{_live_txt}</div>",
+                            unsafe_allow_html=True,
+                        )
+                        if _opupnl is not None:
+                            _pcol = "#2ecc71" if _opupnl >= 0 else "#e74c3c"
+                            _upnl_txt = f"<b style='color:{_pcol}'>{fmt_price(_opupnl)}</b>"
+                        else:
+                            _upnl_txt = "<span style='color:#888'>—</span>"
+                        cpc.markdown(
+                            f"<div style='padding-top:4px;font-size:0.8rem;color:#888'>Unrealized</div>"
+                            f"<div>{_upnl_txt}</div>",
+                            unsafe_allow_html=True,
+                        )
+                        _cp_price = cpd.number_input(
+                            "Exit Price", min_value=0.0, step=0.01, format="%.4f",
+                            value=float(_oplive) if _oplive is not None else None,
+                            key=f"cp_px_{_opid}",
+                        )
+                        cpe.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                        if cpe.form_submit_button("Close", width='stretch', type="primary"):
+                            if not _cp_price:
+                                st.warning("Enter an exit price to close.")
+                            else:
+                                _cp_cs = (float(_op["current_stop"])
+                                          if _op.get("current_stop") is not None
+                                          and not pd.isna(_op.get("current_stop", float("nan")))
+                                          else None)
+                                update_trade(
+                                    _opid,
+                                    _close_today,
+                                    float(_cp_price),
+                                    _op.get("notes") or None,
+                                    _cp_cs,
+                                    bool(_op.get("stop_enabled", 1)),
+                                    get_trade_tag_ids(_opid),
+                                )
+                                st.toast(f"{_op['ticker']} closed at {fmt_price(_cp_price)}.", icon="✅")
+                                st.rerun()
 
         # ── Filter bar ────────────────────────────────────────────────────────
 
@@ -5803,6 +5992,13 @@ if page == "📋  Trading Log":
                         )
                         st.toast("Trade updated.", icon="✅")
                         st.rerun()
+                # Linked trading plan (read-only summary)
+                _dd_plan = _plan_by_id(
+                    _cached_load_trading_plans(st.session_state["_v_plans"]),
+                    _dd_row.get("plan_id"),
+                )
+                if _dd_plan:
+                    st.info(_plan_summary_md(_dd_plan))
                 _dd_lots = load_trade_lots(_dd_id)
                 _dd_divs = load_trade_dividends(_dd_id)
                 _lot_col, _div_col = st.columns(2)
@@ -6526,6 +6722,21 @@ if page == "📋  Trading Log":
                                             default=current_tag_names)
                 edit_notes = st.text_area("Notes", value=row["notes"] or "", height=80)
 
+                # ── Linked trading plan ───────────────────────────────────────
+                _et_plans     = _cached_load_trading_plans(st.session_state["_v_plans"])
+                _et_cur_plan  = _plan_by_id(_et_plans, row.get("plan_id"))
+                _et_plan_opts = ["— None —"] + [_plan_link_label(p) for p in _et_plans]
+                _et_plan_default = _plan_link_label(_et_cur_plan) if _et_cur_plan else "— None —"
+                _et_plan_idx = _et_plan_opts.index(_et_plan_default) if _et_plan_default in _et_plan_opts else 0
+                edit_plan_choice = st.selectbox(
+                    "🔗 Linked trade plan", _et_plan_opts, index=_et_plan_idx,
+                    key=f"edit_link_plan_{trade_id}",
+                    help="Associate this trade with a saved plan (or set to None to unlink).",
+                )
+                if _et_cur_plan:
+                    st.caption("Currently linked:")
+                    st.info(_plan_summary_md(_et_cur_plan))
+
                 # Instrument-specific fields
                 if inst_type == "stock":
                     st.markdown("**Stop Loss**")
@@ -6612,10 +6823,15 @@ if page == "📋  Trading Log":
                 st.caption("Ctrl+Enter to submit")
                 if st.form_submit_button("Save Changes", width='stretch'):
                     edit_tag_ids = [tag_name_to_id[n] for n in edit_tags]
+                    if edit_plan_choice == "— None —":
+                        _edit_plan_id = None
+                    else:
+                        _edit_plan_id = int(_et_plans[_et_plan_opts.index(edit_plan_choice) - 1]["id"])
                     update_trade(
                         trade_id,
                         edit_exit_date, edit_exit_price,
                         edit_notes, edit_current_stop, edit_stop_en, edit_tag_ids,
+                        plan_id=_edit_plan_id,
                         entry_date=edit_entry_date,
                         ticker=edit_ticker if edit_ticker.strip() else None,
                         quantity=edit_qty,
@@ -7073,23 +7289,65 @@ elif page == "📈  Equity Curve":
             # ── Controls row 2: date range ────────────────────────────────────
             _dr_min = _ec_df["date"].min().date()
             _dr_max = _ec_df["date"].max().date()
+
+            # Seed the range in session state (no value= on the widgets below, so
+            # setting it here is warning-free) and clamp to the current data bounds.
+            st.session_state.setdefault("ec_dr_from", _dr_min)
+            st.session_state.setdefault("ec_dr_to",   _dr_max)
+            st.session_state["ec_dr_from"] = min(max(st.session_state["ec_dr_from"], _dr_min), _dr_max)
+            st.session_state["ec_dr_to"]   = min(max(st.session_state["ec_dr_to"],   _dr_min), _dr_max)
+
+            # Quick presets. Anchored to the latest data date (not today) so they
+            # still land on real entries even when the equity history lags. Each
+            # sets the From/To pickers and reruns; returns then re-base to From.
+            def _ec_set_range(_from, _to=_dr_max):
+                _from = _from.date() if hasattr(_from, "date") else _from
+                st.session_state["ec_dr_from"] = max(_from, _dr_min)
+                st.session_state["ec_dr_to"]   = _to
+                st.rerun()
+
+            _qp1, _qp2, _qp3, _qp4, _qp5, _qp6 = st.columns(6)
+            if _qp1.button("7D",  key="ec_qp_7d",  width='stretch', help="Last 7 days"):
+                _ec_set_range(_dr_max - pd.Timedelta(days=7))
+            if _qp2.button("30D", key="ec_qp_30d", width='stretch', help="Last 30 days"):
+                _ec_set_range(_dr_max - pd.Timedelta(days=30))
+            if _qp3.button("MTD", key="ec_qp_mtd", width='stretch', help="Month to date"):
+                _ec_set_range(_dr_max.replace(day=1))
+            if _qp4.button("QTD", key="ec_qp_qtd", width='stretch', help="Quarter to date"):
+                _q_month = ((_dr_max.month - 1) // 3) * 3 + 1
+                _ec_set_range(_dr_max.replace(month=_q_month, day=1))
+            if _qp5.button("YTD", key="ec_qp_ytd", width='stretch', help="Year to date"):
+                _ec_set_range(_dr_max.replace(month=1, day=1))
+            if _qp6.button("All", key="ec_qp_all", width='stretch', help="All time"):
+                _ec_set_range(_dr_min)
+
             _dr_l, _dr_r = st.columns(2)
             _ec_date_from = _dr_l.date_input(
-                "From", value=_dr_min, min_value=_dr_min, max_value=_dr_max, key="ec_dr_from"
+                "From", min_value=_dr_min, max_value=_dr_max, key="ec_dr_from"
             )
             _ec_date_to = _dr_r.date_input(
-                "To", value=_dr_max, min_value=_dr_min, max_value=_dr_max, key="ec_dr_to"
+                "To", min_value=_dr_min, max_value=_dr_max, key="ec_dr_to"
             )
 
-            # Filter to selected range (TWR already computed on full dataset above)
+            # Filter to selected range, then re-base returns to the window start.
             _ec_plot_df = _ec_df[
                 (_ec_df["date"] >= pd.Timestamp(_ec_date_from)) &
                 (_ec_df["date"] <= pd.Timestamp(_ec_date_to))
-            ].copy()
+            ].copy().reset_index(drop=True)
 
             if _ec_plot_df.empty:
                 st.warning("No entries in the selected date range.")
             else:
+                # Re-base TWR so the first in-range day reads 0% — returns chain
+                # from the selected start, not from inception. This also re-bases
+                # every return stat below (total/CAGR/drawdown) to the window.
+                _wb_prev = _ec_plot_df["balance"].shift(1)
+                _wb_prev.iloc[0] = _ec_plot_df["balance"].iloc[0]  # base day: 0%
+                _wb_denom = _wb_prev + _ec_plot_df["contributions"] - _ec_plot_df["withdrawals"]
+                _wb_ret = np.where(_wb_denom != 0, _ec_plot_df["balance"] / _wb_denom - 1, 0.0)
+                _wb_ret[0] = 0.0
+                _ec_plot_df["twr_pct"] = (pd.Series(_wb_ret + 1).cumprod() - 1) * 100
+
                 _show_twr = (_ec_view == "% Return (TWR)")
                 _ec_start_str = str(_ec_plot_df["date"].iloc[0].date())
                 _ec_start_bal = float(_ec_plot_df["balance"].iloc[0])
@@ -7885,6 +8143,11 @@ elif page == "📝  Trading Plan":
         "tp_entry_price":   None,
         "tp_profit_target": None,
         "tp_stop_loss":     None,
+        "tp_instrument":    "Stock",
+        "tp_expiration":    None,
+        "tp_strike":        None,
+        "tp_delta_target":  None,
+        "tp_notes":         "",
     }
     for _k, _v in _tp_defaults.items():
         st.session_state.setdefault(_k, _v)
@@ -7969,17 +8232,29 @@ elif page == "📝  Trading Plan":
         if _tp_earnings is not None:
             _tp_today   = pd.Timestamp.today().date()
             _tp_ed_days = (_tp_earnings - _tp_today).days
+            _tp_ed_flash = 0 <= _tp_ed_days < 7   # less than a week away → flash
             if _tp_ed_days >= 0:
-                _tp_ed_label = f"**{_tp_earnings}** ({_tp_ed_days}d away)"
+                _tp_ed_label = f"{_tp_earnings} ({_tp_ed_days}d away)"
                 _tp_ed_badge = "#f39c12" if _tp_ed_days <= 14 else "#3498db"
             else:
-                _tp_ed_label = f"**{_tp_earnings}** ({abs(_tp_ed_days)}d ago)"
+                _tp_ed_label = f"{_tp_earnings} ({abs(_tp_ed_days)}d ago)"
                 _tp_ed_badge = "#888"
-            _tp_c4.markdown(
-                f"**Earnings Date**<br>"
-                f"<span style='font-size:1rem;color:{_tp_ed_badge}'>{_tp_ed_label}</span>",
-                unsafe_allow_html=True,
-            )
+            if _tp_ed_flash:
+                _tp_c4.markdown(
+                    "<style>@keyframes tpEarnFlash{"
+                    "0%,49%{color:#f1c40f;text-shadow:0 0 6px rgba(241,196,15,.7)}"
+                    "50%,100%{color:#e74c3c;text-shadow:0 0 6px rgba(231,76,60,.7)}}</style>"
+                    "**Earnings Date** ⚠️<br>"
+                    f"<span style='font-size:1rem;font-weight:700;"
+                    f"animation:tpEarnFlash 1s steps(1) infinite'>{_tp_ed_label}</span>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                _tp_c4.markdown(
+                    f"**Earnings Date**<br>"
+                    f"<span style='font-size:1rem;color:{_tp_ed_badge}'>{_tp_ed_label}</span>",
+                    unsafe_allow_html=True,
+                )
         else:
             _tp_c4.markdown("**Earnings Date**<br><span style='color:#888'>N/A</span>", unsafe_allow_html=True)
 
@@ -8021,9 +8296,19 @@ elif page == "📝  Trading Plan":
     # Section 3 — Investment / Trade Setup
     # ════════════════════════════════════════════════════════════════════════
     st.subheader("3 · Investment / Trade Setup")
-    _tp_s3a, _tp_s3b = st.columns(2)
+    _tp_s3a, _tp_s3b, _tp_s3c = st.columns(3)
 
-    _tp_trade_type = _tp_s3a.selectbox(
+    _tp_instr_opts = ["Stock", "Option", "Future", "ETF"]
+    _tp_instrument = _tp_s3a.selectbox(
+        "Instrument",
+        _tp_instr_opts,
+        index=_tp_instr_opts.index(st.session_state["tp_instrument"])
+        if st.session_state["tp_instrument"] in _tp_instr_opts else 0,
+        key="tp_instrument_widget",
+    )
+    st.session_state["tp_instrument"] = _tp_instrument
+
+    _tp_trade_type = _tp_s3b.selectbox(
         "Investment / Trade Type",
         ["Day Trade", "Swing", "Position", "Long-Term Invest", "Options Play"],
         index=["Day Trade", "Swing", "Position", "Long-Term Invest", "Options Play"].index(
@@ -8033,13 +8318,48 @@ elif page == "📝  Trading Plan":
     )
     st.session_state["tp_trade_type"] = _tp_trade_type
 
-    _tp_hold_time = _tp_s3b.text_input(
+    _tp_hold_time = _tp_s3c.text_input(
         "Target Hold Time",
         value=st.session_state["tp_hold_time"],
         placeholder="e.g. 3–5 days, 6 months, until earnings…",
         key="tp_hold_time_widget",
     )
     st.session_state["tp_hold_time"] = _tp_hold_time
+
+    # Options-only detail — expiration, strike, optional delta target
+    if _tp_instrument == "Option":
+        _tp_o1, _tp_o2, _tp_o3 = st.columns(3)
+        _tp_exp_val = None
+        if st.session_state["tp_expiration"]:
+            try:
+                _tp_exp_val = pd.to_datetime(st.session_state["tp_expiration"]).date()
+            except Exception:
+                _tp_exp_val = None
+        _tp_expiration = _tp_o1.date_input(
+            "Expiration",
+            value=_tp_exp_val,
+            key="tp_expiration_widget",
+        )
+        st.session_state["tp_expiration"] = (
+            _tp_expiration.isoformat() if _tp_expiration else None
+        )
+
+        _tp_strike = _tp_o2.number_input(
+            "Strike ($)",
+            min_value=0.0, step=0.5, format="%.2f",
+            value=st.session_state["tp_strike"],
+            key="tp_strike_widget",
+        )
+        st.session_state["tp_strike"] = _tp_strike if _tp_strike else None
+
+        _tp_delta_target = _tp_o3.number_input(
+            "Delta Target (optional)",
+            min_value=0.0, max_value=1.0, step=0.05, format="%.2f",
+            value=st.session_state["tp_delta_target"],
+            key="tp_delta_target_widget",
+            help="Target option delta, e.g. 0.30. Leave blank if not used.",
+        )
+        st.session_state["tp_delta_target"] = _tp_delta_target if _tp_delta_target else None
 
     st.divider()
 
@@ -8134,9 +8454,25 @@ elif page == "📝  Trading Plan":
     st.divider()
 
     # ════════════════════════════════════════════════════════════════════════
-    # Section 6 — Attachments
+    # Section 6 — Notes
     # ════════════════════════════════════════════════════════════════════════
-    st.subheader("6 · Attachments")
+    st.subheader("6 · Notes")
+    _tp_notes = st.text_area(
+        "Notes",
+        value=st.session_state["tp_notes"],
+        height=120,
+        placeholder="Any additional notes, reminders, or context for this plan…",
+        key="tp_notes_widget",
+        label_visibility="collapsed",
+    )
+    st.session_state["tp_notes"] = _tp_notes
+
+    st.divider()
+
+    # ════════════════════════════════════════════════════════════════════════
+    # Section 7 — Attachments
+    # ════════════════════════════════════════════════════════════════════════
+    st.subheader("7 · Attachments")
     st.caption("Files are staged here and saved permanently when you log the plan.")
 
     st.session_state.setdefault("tp_pending_attachments", [])
@@ -8170,9 +8506,9 @@ elif page == "📝  Trading Plan":
     st.divider()
 
     # ════════════════════════════════════════════════════════════════════════
-    # Section 7 — Save & Saved Plans
+    # Section 8 — Save & Saved Plans
     # ════════════════════════════════════════════════════════════════════════
-    st.subheader("7 · Save & Saved Plans")
+    st.subheader("8 · Save & Saved Plans")
 
     _tp_sa1, _tp_sa2 = st.columns([1, 5])
     if _tp_sa1.button("💾  Log This Plan", type="primary", width='stretch', key="tp_save_btn"):
@@ -8203,6 +8539,11 @@ elif page == "📝  Trading Plan":
                 "profit_target": _tp_pt,
                 "stop_loss":     _tp_sl,
                 "rr_ratio":      _tp_rr_save,
+                "instrument":    st.session_state["tp_instrument"],
+                "expiration":    st.session_state["tp_expiration"],
+                "strike":        st.session_state["tp_strike"],
+                "delta_target":  st.session_state["tp_delta_target"],
+                "notes":         st.session_state["tp_notes"],
             })
             for _pa in st.session_state["tp_pending_attachments"]:
                 save_plan_attachment(_new_plan_id, _pa["name"], _pa["data"])
@@ -8233,15 +8574,26 @@ elif page == "📝  Trading Plan":
             with st.expander(_sp_label, expanded=False):
                 _sv1, _sv2, _sv3 = st.columns(3)
                 _sv1.markdown(f"**Sentiment:** {_sp_sent}")
-                _sv2.markdown(f"**Hold Time:** {_sp.get('hold_time') or '—'}")
-                _sp_ep_str = f"${_sp['entry_price']:.4f}" if _sp.get('entry_price') else "—"
-                _sv3.markdown(f"**Entry Price:** {_sp_ep_str}")
+                _sv2.markdown(f"**Instrument:** {_sp.get('instrument') or 'Stock'}")
+                _sv3.markdown(f"**Hold Time:** {_sp.get('hold_time') or '—'}")
+
+                # Options-only detail
+                if (_sp.get("instrument") or "").lower() == "option":
+                    _so1, _so2, _so3 = st.columns(3)
+                    _so1.markdown(f"**Expiration:** {_sp.get('expiration') or '—'}")
+                    _sp_strike_str = f"${_sp['strike']:.2f}" if _sp.get('strike') else "—"
+                    _so2.markdown(f"**Strike:** {_sp_strike_str}")
+                    _sp_delta_str = f"{_sp['delta_target']:.2f}" if _sp.get('delta_target') else "—"
+                    _so3.markdown(f"**Delta Target:** {_sp_delta_str}")
+
                 _sv4, _sv5, _sv6 = st.columns(3)
+                _sp_ep_str = f"${_sp['entry_price']:.4f}" if _sp.get('entry_price') else "—"
                 _sp_pt_str = f"${_sp['profit_target']:.4f}" if _sp.get('profit_target') else "—"
                 _sp_sl_str = f"${_sp['stop_loss']:.4f}" if _sp.get('stop_loss') else "—"
-                _sv4.markdown(f"**Profit Target:** {_sp_pt_str}")
-                _sv5.markdown(f"**Stop Loss:** {_sp_sl_str}")
-                _sv6.markdown(f"**R:R Ratio:** {_sp_rr}")
+                _sv4.markdown(f"**Entry Price:** {_sp_ep_str}")
+                _sv5.markdown(f"**Profit Target:** {_sp_pt_str}")
+                _sv6.markdown(f"**Stop Loss:** {_sp_sl_str}")
+                st.markdown(f"**R:R Ratio:** {_sp_rr}")
 
                 if _sp.get("rationale"):
                     st.markdown(f"**Trigger / Rationale:** {_sp['rationale']}")
@@ -8255,6 +8607,8 @@ elif page == "📝  Trading Plan":
                 _confs = [c for c in _confs if c]
                 if _confs:
                     st.markdown("**Confirmations:** " + "  ·  ".join(_confs))
+                if _sp.get("notes"):
+                    st.markdown(f"**Notes:** {_sp['notes']}")
 
                 # Attachments
                 _sp_attaches = load_plan_attachments(_sp["id"])
@@ -8295,6 +8649,11 @@ elif page == "📝  Trading Plan":
                     st.session_state["tp_entry_price"]   = _sp.get("entry_price")
                     st.session_state["tp_profit_target"] = _sp.get("profit_target")
                     st.session_state["tp_stop_loss"]     = _sp.get("stop_loss")
+                    st.session_state["tp_instrument"]    = _sp.get("instrument") or "Stock"
+                    st.session_state["tp_expiration"]    = _sp.get("expiration")
+                    st.session_state["tp_strike"]        = _sp.get("strike")
+                    st.session_state["tp_delta_target"]  = _sp.get("delta_target")
+                    st.session_state["tp_notes"]         = _sp.get("notes", "") or ""
                     st.session_state["tp_pending_attachments"] = []
                     st.rerun()
                 if _sp_btn2.button("🗑️  Delete Plan", key=f"tp_del_{_sp['id']}", width='stretch'):

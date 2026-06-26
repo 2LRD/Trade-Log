@@ -186,6 +186,14 @@ MIGRATIONS = [
     ("trades", "trail_amount",             "REAL"),
     # non-US exchange code (e.g. IBIS, LSE, TSX) — drives yfinance suffix for price lookups
     ("trades", "exchange",                 "TEXT DEFAULT ''"),
+    # optional link to the trading plan this entry was executed from
+    ("trades", "plan_id",                  "INTEGER"),
+    # trading-plan instrument & options detail
+    ("trading_plans", "instrument",   "TEXT DEFAULT 'Stock'"),
+    ("trading_plans", "expiration",   "TEXT"),
+    ("trading_plans", "strike",       "REAL"),
+    ("trading_plans", "delta_target", "REAL"),
+    ("trading_plans", "notes",        "TEXT"),
 ]
 
 INDEXES = [

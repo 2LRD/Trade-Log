@@ -52,10 +52,35 @@ LAUNCHER = r"""#!/bin/bash
 MACOS_DIR="$(cd "$(dirname "$0")" && pwd)"
 RESOURCES_DIR="$(cd "$MACOS_DIR/../Resources" && pwd)"
 VENV_DIR="$RESOURCES_DIR/.venv"
+PORT=8502
+
+# When the .app is double-clicked in Finder, macOS launches it with a bare-bones
+# environment — a minimal PATH and sometimes no HOME — which is different from a
+# normal Terminal session. uv's first-run setup can fail in that environment
+# (e.g. "Could not create a Python environment") even though it works fine when
+# the launcher is run from Terminal. Restore sane defaults so setup behaves the
+# same either way.
+export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+[ -n "$HOME" ] || export HOME="$(/usr/bin/dscl . -read "/Users/$(/usr/bin/id -un)" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+
+# Keep uv's Python + cache downloads in one predictable, writable spot (no spaces
+# in the path) so they don't depend on whatever the launch environment provides.
+export UV_CACHE_DIR="$HOME/.tradelog/uv-cache"
+export UV_PYTHON_INSTALL_DIR="$HOME/.tradelog/python"
+
+# Force copy instead of hardlink. If the install path sits under a cloud-synced
+# folder (iCloud Drive, OneDrive, Dropbox), hardlinking from the cache can fail;
+# copy mode sidesteps it. Matches the Windows installer.
+export UV_LINK_MODE=copy
+
 # Pick the right binary for this Mac's CPU
 ARCH=$(uname -m)   # arm64 on Apple Silicon, x86_64 on Intel
 UV_BIN="$RESOURCES_DIR/_uv/$ARCH/uv"
-PORT=8502
+
+# Everything during first-run setup is logged here so failures are diagnosable.
+LOG_DIR="$HOME/Library/Logs"
+LOG="$LOG_DIR/Trade Log Setup.log"
+mkdir -p "$LOG_DIR" 2>/dev/null
 
 alert() {
     osascript -e "display alert \"Trade Log\" message \"$*\" as critical \
@@ -63,37 +88,51 @@ alert() {
         || echo "ERROR: $*" >&2
 }
 
+# Surface the real error (tail of the setup log) so the user can report what
+# actually went wrong instead of just "please try again".
+fail() {
+    local detail
+    detail="$(tail -n 6 "$LOG" 2>/dev/null)"
+    alert "$1\n\nDetails:\n$detail\n\nFull log:\n$LOG"
+    exit 1
+}
+
 # ── First-run setup ─────────────────────────────────────────────────────────
-if [ ! -f "$VENV_DIR/bin/python" ]; then
+if [ ! -x "$VENV_DIR/bin/python" ]; then
 
     if [ ! -f "$UV_BIN" ]; then
         alert "Setup tools are missing.\n\nPlease re-download Trade Log and try again."
         exit 1
     fi
 
-    chmod +x "$UV_BIN"
+    # Strip the macOS quarantine flag from the bundled tools so Gatekeeper
+    # doesn't silently block them when launched from Finder.
+    xattr -dr com.apple.quarantine "$RESOURCES_DIR" 2>/dev/null || true
+    chmod +x "$UV_BIN" 2>/dev/null || true
+
+    # Clear any half-built venv left behind by a previous failed attempt.
+    rm -rf "$VENV_DIR" 2>/dev/null
 
     osascript -e 'display notification "Setting up Trade Log for the first time — this takes 1–2 minutes..." with title "Trade Log"' 2>/dev/null
 
+    {
+        echo "=== Trade Log setup: $(date) ==="
+        echo "arch=$ARCH  HOME=$HOME"
+        echo "PATH=$PATH"
+    } >>"$LOG" 2>&1
+
     # Install Python 3.12 (downloaded by uv, no system Python needed)
-    "$UV_BIN" python install 3.12 || {
-        alert "Could not install Python 3.12.\n\nPlease check your internet connection and try again."
-        exit 1
-    }
+    "$UV_BIN" python install 3.12 >>"$LOG" 2>&1 \
+        || fail "Could not install Python.\n\nPlease check your internet connection and try again."
 
     # Create virtual environment
-    "$UV_BIN" venv --python 3.12 "$VENV_DIR" || {
-        alert "Could not create a Python environment.\n\nPlease try again."
-        exit 1
-    }
+    "$UV_BIN" venv --python 3.12 "$VENV_DIR" >>"$LOG" 2>&1 \
+        || fail "Could not create a Python environment."
 
     # Install Trade Log dependencies
     "$UV_BIN" pip install -r "$RESOURCES_DIR/requirements.txt" \
-        --python "$VENV_DIR/bin/python" || {
-        alert "Could not install dependencies.\n\nPlease check your internet connection and try again."
-        rm -rf "$VENV_DIR"
-        exit 1
-    }
+        --python "$VENV_DIR/bin/python" >>"$LOG" 2>&1 \
+        || { rm -rf "$VENV_DIR"; fail "Could not install dependencies.\n\nPlease check your internet connection and try again."; }
 
 fi
 
@@ -119,6 +158,26 @@ osascript -e 'display dialog "Trade Log is running in your browser.\n\nClick Qui
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 kill "$STREAMLIT_PID" 2>/dev/null
 wait "$STREAMLIT_PID" 2>/dev/null
+"""
+
+# ── Backup .command launcher ─────────────────────────────────────────────────
+# Placed next to the .app at the top level of the distribution folder (mode 0o755).
+#
+# Some Mac setups can't launch the .app cleanly (Finder's launch environment trips
+# up uv's first-run setup). A double-clickable .command opens Terminal and runs the
+# SAME launcher inside a normal shell — the path a user reported as the reliable
+# workaround — so it just works, with no digging into "Show Package Contents".
+COMMAND_FALLBACK = r"""#!/bin/bash
+# Trade Log — backup launcher.
+#
+# Use this ONLY if double-clicking "Trade Log.app" shows an error such as
+# "Could not create a Python environment." It runs the exact same app from a
+# Terminal window, which avoids some macOS launch quirks on certain setups.
+#
+# First time: macOS may say it "cannot verify the developer." If so, right-click
+# this file -> Open -> Open.
+DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "$DIR/Trade Log.app/Contents/MacOS/launcher"
 """
 
 # ── Info.plist — identifies this as a macOS app bundle ──────────────────────
@@ -243,6 +302,12 @@ def build() -> None:
         add_str(tf, f"{BUNDLE}/MacOS/launcher", LAUNCHER, mode=0o755)
         print("  + MacOS/launcher")
 
+        # Backup .command launcher next to the .app (for setups where Finder
+        # can't launch the .app cleanly)
+        fallback_name = f"{TOP}/Open Trade Log (if the app won't open).command"
+        add_str(tf, fallback_name, COMMAND_FALLBACK, mode=0o755)
+        print(f"  + {fallback_name}")
+
         # App metadata
         add_str(tf, f"{BUNDLE}/Info.plist", INFO_PLIST)
         print("  + Info.plist")
@@ -297,6 +362,12 @@ def build() -> None:
     print("     No Python required — everything is included.")
     print("  6. Your browser opens Trade Log automatically.")
     print("  7. Click 'Quit' in the dialog to stop the app.")
+    print()
+    print("  If 'Trade Log.app' won't open (e.g. 'Could not create a Python")
+    print("  environment'), double-click")
+    print("  'Open Trade Log (if the app won't open).command' instead — it runs")
+    print("  the same app from Terminal and works on setups the .app trips on.")
+    print("  Setup errors are logged to ~/Library/Logs/Trade Log Setup.log")
     print("-" * 60)
     print()
 
