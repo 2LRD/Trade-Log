@@ -4721,11 +4721,15 @@ if page == "📋  Trading Log":
         date_col_sel = fr2c2.selectbox("Filter date", ["Entry Date", "Exit Date"], key="filter_date_col")
         date_range   = fr2c3.date_input("Date range", key="filter_date_range")
         fr2c4.markdown("<div style='margin-top:1.6rem'></div>", unsafe_allow_html=True)
-        if fr2c4.button("↺ Reset", key="reset_filters", help="Reset all filters to defaults",
-                        width='stretch'):
+        def _reset_filters():
+            # Runs as an on_click callback: fires before any widget is instantiated
+            # on the next rerun, so assigning to widget-backed keys is legal here.
+            # (Doing it inline after the widgets are created raises StreamlitAPIException.)
             for _fk, _fv in _FILTER_DEFAULTS.items():
                 st.session_state[_fk] = _fv
-            st.rerun()
+
+        fr2c4.button("↺ Reset", key="reset_filters", help="Reset all filters to defaults",
+                     width='stretch', on_click=_reset_filters)
 
         # ── Apply filters ─────────────────────────────────────────────────────
 
