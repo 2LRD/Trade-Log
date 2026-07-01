@@ -47,3 +47,6 @@ schwab_token.json
 
 # Trade Log launcher restart sentinel
 .restart_requested
+
+# ── Local error/debug notes ───────────────────────────────────────────────────
+Errors/
